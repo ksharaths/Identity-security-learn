@@ -168,7 +168,7 @@ Decoded with jwt.ms from a successful redemption. Unique values are redacted.
 | `sub` | `<redacted>` | Pairwise: differs from the Graph `/me` `id` |
 | `iat` / `nbf` | same time | Identical |
 | `exp` | about 24 h after `iat` | Much longer than the access token's 3599 s |
-| `nonce` | `<redacted>` |  Present; not compared". |
+| `nonce` | `<redacted>` |  Present; not compared. |
 | `aio` | `<redacted>` | Internal Entra claim, not for the app to use |
 
 ### Access token
@@ -235,8 +235,6 @@ I edited `state` in the redirect URL by hand and redeemed the code anyway. Entra
 3. Compare the returned value with the stored one.
 4. Reject the response on any mismatch.
 
-This is separate from PKCE. `redeem.py` implements the comparison.
-
 ---
 
 ## 10. Observations about method
@@ -272,11 +270,11 @@ I recorded these instead of inventing explanations.
 
 ## 13. What I learned
 
-- The oauth flow including the various components like resource owner, client, authorization server and resource server. Learned that authorize request goes over the `front channel`(browser) and the token request goes over the `back channel` 
+- The OAuth flow including the various components like resource owner, client, authorization server and resource server. Learned that authorize request goes over the `front channel` (browser) and the token request goes over the `back channel` 
 - The authorize request parameters - `client_id`, `response_type`, `state`, `nonce`, `scope`, `redirect_uri`, `code_challenge`, & `code_challenge_method`.
 - The token request parameters - `code`, `grant_type`, `code_verifier`, `redirect_uri` & `client_id`
 - The role of PKCE, i.e., how `code_verifier` and `code_challenge` ensure that the `code` even when intercepted cannot be used by an attacker to get tokens.
-- I also learned that resending the same code, changing the `verifier`, or modifying the `code` results in `invalid_grant` error. Modifying the `redirect_uri` returns the `invalid_request` error, with clear description of what error occurred in the response.Modifying the redirect_uri returned invalid_request. Each response had a clear description of the error.
+- - Resending the same code, changing the verifier or modifying the code returned `invalid_grant`. Modifying the `redirect_uri` returned `invalid_request`. Each response had a clear description of the error.
 - Interestingly, when the character near the end of the code, just before the trailing `$$` was changed, I still received valid tokens. I couldn't explain why this is so.  
 - Entra does not check `state`. It never receives it at the token step. The client has to verify that they match and reject the response when they do not match.
 - In my run, the personal-account access token was not a decodable JWT, but it worked fine against Graph.
