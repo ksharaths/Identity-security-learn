@@ -1,158 +1,118 @@
-# OAuth 2.0 Authorization Code Flow with PKCE — Microsoft Entra
+# OAuth 2.0 Authorization Code Flow with PKCE: Microsoft Entra
 
 A hands-on lab implementing the OAuth 2.0 Authorization Code Flow with PKCE manually against Microsoft Entra, without MSAL or an SDK.
 
-The lab was designed to understand the protocol at the request/response level and then deliberately break individual security controls to observe how Entra responds.
+The goal was to understand the protocol at the request/response level, then deliberately break one security control at a time to see how Entra responds.
 
-> **Transparency note:** I performed the lab myself, including app registration, running the commands, collecting the results, and conducting the security experiments. AI assistance was used for guidance and starter code. The observations below are from my own experiments.
+> **Transparency note:** I did the lab myself: app registration, running the commands, collecting results and running the experiments. AI assistance was used for guidance and starter code. The observations below come from my own runs.
+
+**Scope of the findings:** everything here was tested with a **personal Microsoft account** against the `consumers` endpoint. Work or school (organizational) tenants can behave differently, for example in access token format and consent behavior, so treat these results as specific to this setup.
+
+## Contents
+
+1. [Environment](#1-environment)
+2. [What PKCE is and why the hash goes first](#2-what-pkce-is-and-why-the-hash-goes-first)
+3. [PKCE implementation](#3-pkce-implementation)
+4. [`state`, `nonce` and PKCE](#4-state-nonce-and-pkce)
+5. [Authorization request](#5-authorization-request)
+6. [Token exchange](#6-token-exchange)
+7. [Token analysis](#7-token-analysis)
+8. [Breaking the flow](#8-breaking-the-flow)
+9. [Findings](#9-findings)
+10. [Observations about method](#10-observations-about-method)
+11. [Things I could not explain](#11-things-i-could-not-explain)
+12. [Mental model](#12-mental-model)
+13. [What I learned](#13-what-i-learned)
+14. [Next steps](#14-next-steps)
 
 ---
 
 ## 1. Environment
 
-- Microsoft Entra ID
-- Personal Microsoft account
-- Free Azure trial
-- Entra app registration configured as a **Mobile and desktop application / public client**
-- Redirect URI: `http://localhost`
+- Microsoft Entra ID, personal Microsoft account, free Azure trial
+- App registration: **Mobile and desktop application / public client**
+- Redirect URI: `http://localhost` (nothing listens on it, so the browser shows a connection error and the `code` can be read from the address bar)
 - Python 3 (standard library only)
-- PowerShell `curl.exe`
-- jwt.ms
-- Microsoft Graph `/me` endpoint
+- PowerShell `curl.exe`, jwt.ms, Microsoft Graph `/me`
 
-### Scopes requested
+Scopes requested:
 
 ```text
 openid offline_access User.Read
 ```
 
-No production credentials, secrets, access tokens, or refresh tokens are included in this repository.
+### Code
+
+- `start.py`: generates a fresh verifier, `state` and `nonce`, and prints the authorize URL.
+- Code redemption was done manually with PowerShell `curl.exe` (see section 6).
+
+No secrets or real tokens are committed. 
 
 ---
 
-# 2. What is PKCE?
+## 2. What PKCE is and why the hash goes first
 
-In the Authorization Code Flow, the authorization code travels through the browser and could potentially be intercepted.
+In the authorization code flow, the authorization code travels through the browser and could be intercepted. A public client has no client secret to prove its identity when redeeming the code.
 
-For a public client, there is no client secret that can be used to authenticate the application during token redemption.
-
-PKCE addresses this by introducing a one-time secret called the `code_verifier`.
-
-The flow is:
+PKCE adds a one-time secret, the `code_verifier`, and sends only its hash in the first step:
 
 ```text
-1. Client generates a random code_verifier
+1. Client generates a random code_verifier.
+   code_challenge = BASE64URL( SHA-256( code_verifier ) )
 
-       code_verifier
-             |
-             | SHA-256
-             v
-       code_challenge
+2. Authorize request carries code_challenge  ->  Entra stores it.
 
+3. Entra returns an authorization code via the browser redirect.
 
-2. Client sends the code_challenge
-   in the authorization request
+4. Token request carries code + code_verifier.
 
-       Browser
-          |
-          | code_challenge
-          v
-       Entra
-
-
-3. Entra returns an authorization code
-
-       Entra
-          |
-          | authorization code
-          v
-       Browser / Client
-
-
-4. Client sends the authorization code
-   together with the original code_verifier
-
-       Client
-          |
-          | code + code_verifier
-          v
-       Entra Token Endpoint
-
-
-5. Entra hashes the verifier and compares it
-   with the original code_challenge.
-
-       SHA256(code_verifier)
-                ==
-       stored code_challenge
-
-                |
-                v
-             Tokens
+5. Entra computes SHA-256 of the verifier and compares it with the
+   stored code_challenge. Only a match returns tokens.
 ```
 
-## Why does the hash go first?
+### Why the hash goes first
 
-The authorization request travels through the browser, which is the channel PKCE is designed to protect.
+The authorize request is sent through the browser as a GET request, so an attacker can capture it. The response comes back through the browser too, and it carries the authorization code, which can be redeemed for an `access_token`, `id_token` and `refresh_token`. If the `code_verifier` were sent in the authorize request, an attacker who captured it and the code would have everything needed to redeem the code and get the tokens. 
 
-If the original `code_verifier` were sent in the authorization request, an attacker who captured that request could obtain the secret required to redeem the authorization code.
-
-Instead, only the `code_challenge` is sent.
-
-The original verifier is retained by the client and sent later during the token exchange.
-
-An attacker who obtains only the authorization code therefore does not have the verifier required to redeem it.
+Sending the `code_challenge` (the hashed verifier) instead prevents this. The attacker may see the code and the challenge, but cannot redeem the code without the verifier. The verifier goes to the token endpoint later on the back channel. Entra hashes it and compares the result with the `code_challenge` from the authorize request, and only a match returns tokens. SHA-256 is a one-way function, so the attacker cannot derive the verifier from the challenge. This relies on the verifier being long and random, which is why the lab uses `secrets` rather than `random`.
 
 ---
 
-# 3. PKCE Implementation
-
-The verifier was generated using Python's `secrets` module:
+## 3. PKCE implementation
 
 ```python
-import secrets
-import hashlib
-import base64
+import secrets, hashlib, base64
 
 code_verifier = secrets.token_urlsafe(64)
 
-digest = hashlib.sha256(
-    code_verifier.encode("ascii")
-).digest()
-
-code_challenge = base64.urlsafe_b64encode(
-    digest
-).decode("ascii").rstrip("=")
+digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+code_challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 ```
 
-Important implementation details:
+Details that matter:
 
-- `secrets` is used instead of `random` because the verifier must be unpredictable.
-- SHA-256 operates on the ASCII bytes of the verifier.
-- `.digest()` is used rather than `.hexdigest()`.
-- Base64 URL encoding is used.
-- Base64 padding (`=`) is removed.
-- A new verifier is generated for every authorization attempt.
+- `secrets`, not `random`: the verifier must be unpredictable.
+- SHA-256 runs on the ASCII bytes of the verifier, using `.digest()` rather than `.hexdigest()`.
+- Base64 **URL-safe** encoding, with the `=` padding stripped.
+- A new verifier for every authorization attempt.
 
 ---
 
-# 4. `state`, `nonce`, and PKCE
+## 4. `state`, `nonce` and PKCE
 
-These three values can look similar but perform different security functions.
+Three values that look similar but guard different steps.
 
-| Mechanism | What it binds | Who validates it |
-|---|---|---|
-| `code_challenge` / `code_verifier` | Authorization request and token redemption | Entra |
-| `state` | Authorization request and redirect response | Client application |
-| `nonce` | Authorization request and ID token | Client application |
-
-This distinction became particularly clear during the breaking tests.
+| Mechanism | Binds | Validated by |
+| --- | --- | --- |
+| `code_challenge` / `code_verifier` | authorize request to token redemption | Entra |
+| `state` | authorize request to the redirect response | client app |
+| `nonce` | authorize request to the ID token | client app |
 
 ---
 
-# 5. Authorization Request
+## 5. Authorization request
 
-The authorization request contained:
+Parameters:
 
 ```text
 client_id
@@ -165,23 +125,19 @@ code_challenge_method=S256
 nonce
 ```
 
-The authorization endpoint used was:
+Endpoint:
 
 ```text
 https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize
 ```
 
-After authentication, Entra redirected the browser to the registered redirect URI with an authorization code and `state`.
-
-Because nothing was listening on `localhost`, the browser displayed a connection error. The authorization code and state were nevertheless visible in the browser address bar.
+After sign-in, Entra redirects to the registered redirect URI with `code` and `state` in the query string.
 
 ---
 
-# 6. Token Exchange
+## 6. Token exchange
 
-The authorization code was redeemed against the token endpoint using PowerShell `curl.exe`.
-
-The request contained:
+The code was redeemed at the token endpoint with `curl.exe`:
 
 ```text
 grant_type=authorization_code
@@ -191,260 +147,148 @@ redirect_uri=http://localhost
 code_verifier=<VERIFIER>
 ```
 
-The token response contained:
+The response contained `access_token`, `id_token`, `refresh_token` and `expires_in` (3599 seconds).
 
-- `access_token`
-- `id_token`
-- `refresh_token`
-- `expires_in`
+Gotcha: characters in the code such as `!` and `*` need careful shell quoting. In PowerShell, use single quotes around the code.
 
 ---
 
-# 7. Token Analysis
+## 7. Token analysis
 
-## ID Token
+### ID token
 
-The ID token was decoded using jwt.ms.
+Decoded with jwt.ms from a successful redemption. Unique values are redacted.
 
-| Claim | Meaning | Observation |
-|---|---|---|
-| `aud` | Who the token is intended for | Matched the application's client ID |
-| `iss` | Token issuer | Microsoft identity platform |
-| `tid` | Tenant identifier | Personal Microsoft account tenant |
-| `exp` | Expiration time | Approximately 24 hours after `iat` |
-| `nonce` | Value associated with the authentication request | Present in the token |
-| `sub` | Subject identifier | Pairwise identifier; differed from the Microsoft Graph user ID |
-| `ver` | Token version | `2.0` |
+| Claim | Value | What I observed |
+| --- | --- | --- |
+| `ver` | `2.0` | Matches the v2.0 endpoint I used |
+| `iss` | `https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0` | The tenant GUID is the shared consumer tenant for personal accounts, not a tenant of mine |
+| `tid` | `9188040d-6c67-4c5b-b112-36a304b66dad` | Same GUID as in `iss`. An app limiting which tenants can sign in would check this |
+| `aud` | `<CLIENT_ID>` | Matched my app registration |
+| `sub` | `<redacted>` | Pairwise: differs from the Graph `/me` `id` |
+| `iat` / `nbf` | same time | Identical |
+| `exp` | about 24 h after `iat` | Much longer than the access token's 3599 s |
+| `nonce` | `<redacted>` |  Present; not compared". |
+| `aio` | `<redacted>` | Internal Entra claim, not for the app to use |
 
-### Observation
+### Access token
 
-The `aud` claim in the ID token matched the application's client ID.
+jwt.ms could not decode the access token. Rather than assume it was broken, I tested it against Microsoft Graph:
 
-The `sub` claim was different from the user's Microsoft Graph `id`, demonstrating that the identifiers serve different purposes.
-
----
-
-## Access Token
-
-The access token could not be decoded using jwt.ms.
-
-Rather than assuming that the token was invalid, I tested it against Microsoft Graph:
-
-```http
+```text
 GET https://graph.microsoft.com/v1.0/me
 Authorization: Bearer <ACCESS_TOKEN>
 ```
 
-The request successfully returned the user's profile.
+The call returned my profile, so the token was valid.
 
-### Observation
+- **ID token:** meant for the client app to read.
+- **Access token:** meant for the resource (here Graph). The client should not assume it is a JWT or try to interpret it.
 
-The access token was not a normal JWT that could be decoded by the client.
-
-This reinforced an important distinction:
-
-- **ID token** — intended for the client application to consume.
-- **Access token** — intended for the resource/API.
-- An access token should not be assumed to be a JWT or something the client should interpret.
-
-I therefore did not observe the `scp` claim in this experiment.
+I therefore did not observe an `scp` claim in this lab.
 
 ---
 
-# 8. Breaking the Flow
+## 8. Breaking the flow
 
-Each experiment used a fresh authentication attempt and changed one variable at a time.
+Each experiment used a fresh sign-in and changed one variable.
 
-| Experiment | Result | Error |
-|---|---|---|
-| Wrong verifier | Token redemption failed | `invalid_grant`, `AADSTS70000` |
-| No verifier | Token redemption failed | `invalid_grant`, `AADSTS70000` |
-| Corrupted authorization code | Token redemption failed | `invalid_grant`, `AADSTS70000` |
-| Redeemed same code twice | Second redemption failed | `invalid_grant`, `AADSTS70000` |
-| Mismatched redirect URI — token step | Request rejected | `invalid_request`, `AADSTS90023` |
-| Mismatched redirect URI — authorize step | Request rejected | `invalid_request` |
-| Changed `state` | Tokens were still issued | No Entra error |
-
----
-
-# 9. Security Findings
-
-## 9.1 Wrong PKCE verifier
-
-Changing one character in the verifier caused token redemption to fail.
-
-Entra reported:
-
-```text
-The provided 'code_verifier' input value does not match
-the original 'code_challenge'.
-```
-
-This demonstrates that the authorization code is bound to the original PKCE challenge.
+| Experiment | Result | Error | Error Description |
+| --- | --- | --- | --- |
+| Wrong verifier | Redemption failed |  `invalid_grant`, `AADSTS70000` | The provided 'code_verifier' input value does not match the original 'code_challenge.' |
+| No verifier | Redemption failed | `invalid_grant`, `AADSTS70000` | The provided 'code_verifier' input value does not match the original 'code_challenge.' |
+| Corrupted authorization code | Redemption failed | `invalid_grant`, `AADSTS70000` | The provided value for the 'code' parameter is not valid. |
+| Same code redeemed twice | Second redemption failed | `invalid_grant`, `AADSTS70000` | The provided value for the 'code' parameter is not valid. The code has expired. |
+| Redirect URI mismatch, authorize step | Rejected in the browser  | `invalid_request`, No error code | The provided value for the input parameter 'redirect_uri' is not valid. The expected value is a URI which matches a redirect URI registered for this client application. |
+| Redirect URI mismatch, token step | Redemption failed| `invalid_request`, `AADSTS90023` | The provided value for the input parameter 'redirect_uri' is not valid. The expected value is a URI which matches a redirect URI registered for this client application. |
+| `state` edited by hand | Tokens still issued | None | No Entra error. The check is the client's job. |
 
 ---
 
-## 9.2 Missing PKCE verifier
+## 9. Findings
 
-Removing the verifier also caused redemption to fail.
+### 9.1 Wrong PKCE verifier
 
-This is important because allowing the verifier to be omitted would effectively create a downgrade path where an attacker with a stolen authorization code could attempt to redeem it without PKCE.
+Changing one character of the verifier made redemption fail. Entra reported that the `code_verifier` does not match the original `code_challenge`. The authorization code is bound to the challenge it was issued against.
 
----
+### 9.2 Missing PKCE verifier
 
-## 9.3 Authorization code replay
+Leaving the verifier out also failed. This matters because if omission were allowed, an attacker with a stolen code could simply skip PKCE (a downgrade).
 
-Redeeming the same authorization code twice failed.
+### 9.3 Authorization code replay
 
-Entra reported the code as invalid/expired.
+Redeeming the same code twice failed, and Entra described the code as invalid or expired. The message does not separate "already used" from "timed out", so this shows the code cannot be reused, but not the exact internal reason.
 
-The error message did not explicitly distinguish replay from timeout, so the experiment demonstrates that the code could not be reused, but the error message alone does not prove the exact internal reason.
+### 9.4 Redirect URI mismatch
 
----
+A mismatched `redirect_uri` was rejected at both steps. At the authorize step the request failed in the browser with `invalid_request` and no `AADSTS` code. At the token step the response was `invalid_request` with `AADSTS90023`. Both described the expected value as a URI matching one
+registered for the client application.
 
-## 9.4 Redirect URI mismatch
+The redirect URI is checked at both stages, so it is part of the trust relationship between the client and Entra.
 
-A mismatched redirect URI was rejected.
+### 9.5 `state`
 
-The redirect URI was validated during both the authorization and token stages.
+I edited `state` in the redirect URL by hand and redeemed the code anyway. Entra still issued tokens, because `state` is never sent to the token endpoint. Entra only echoes it back in the redirect, so it cannot detect tampering. Detecting it is the client's job:
 
-The token endpoint returned:
+1. Generate a random `state` per request.
+2. Store it.
+3. Compare the returned value with the stored one.
+4. Reject the response on any mismatch.
 
-```text
-invalid_request
-AADSTS90023
-```
-
-This demonstrates that the redirect URI is part of the trust relationship between the client and Entra.
-
----
-
-## 9.5 `state` manipulation
-
-Changing the `state` value did **not** cause Entra to reject the request.
-
-Entra returned the modified value and still issued tokens.
-
-This demonstrated that Entra does not validate the application's `state` value.
-
-The client application is responsible for:
-
-1. Generating a random `state`.
-2. Storing the value associated with the authorization request.
-3. Comparing the returned `state` with the original value.
-4. Rejecting the response if they do not match.
-
-This is separate from PKCE.
+This is separate from PKCE. `redeem.py` implements the comparison.
 
 ---
 
-# 10. Important Observations
+## 10. Observations about method
 
-### Error codes are not always sufficient
+**Error codes are not always enough.** `AADSTS70000` appeared for several different failures, so the descriptive message was more useful than the code. 
 
-`AADSTS70000` was observed for several different conditions:
+**Change one variable at a time.** Several confusing early results came from changing two things at once.
 
-- Wrong verifier
-- Missing verifier
-- Invalid authorization code
-- Authorization-code replay
-
-The descriptive error message was therefore more useful than the error code alone.
-
-### Change one variable at a time
-
-Several confusing results occurred during early experimentation.
-
-Changing only one variable per test made the results much easier to interpret.
-
-This is an important lesson for security testing generally:
-
-> Establish a baseline, change one variable, observe the result, and document it.
+> Establish a baseline, change one variable, observe, document.
 
 ---
 
-# 11. Things I Could Not Fully Explain
+## 11. Things I could not explain
 
-I deliberately recorded observations that I could not explain rather than inventing explanations.
+I recorded these instead of inventing explanations.
 
-### Authorization code character change
-
-Changing one character near the end of the authorization code was accepted, while changing a character in the middle caused the code to fail.
-
-A possible explanation is related to the internal encoding/representation of Microsoft's authorization code, but this was not investigated further.
-
-I therefore do not consider this a confirmed finding.
-
-### Unexpected wrong-verifier result
-
-An early wrong-verifier test produced an unexpected result.
-
-I could not reproduce it.
-
-A clean, controlled wrong-verifier test subsequently failed as expected, so I treated the original result as an unexplained test/setup issue rather than a security finding.
+**Authorization code character change.** When the character near the end of the code, just before the trailing `$$` was changed, I still received valid tokens. I couldn't explain why this is so.  
 
 ---
 
-# 12. Security Mental Model
+## 12. Mental model
 
-The main mental model I took away from this lab is:
-
-```text
-PKCE
- └── Protects authorization-code redemption
-     └── Validated by Entra
-
-
-state
- └── Correlates authorization request and response
-     └── Validated by the client application
-
-
-nonce
- └── Binds the ID token to the authentication request
-     └── Validated by the client application
-
-
-redirect_uri
- └── Restricts where authorization responses may be sent
-     └── Validated by Entra
-
-
-ID token
- └── Intended for the client application
-
-
-Access token
- └── Intended for the resource/API
-```
+| Control | Protects | Validated by |
+| --- | --- | --- |
+| PKCE | authorization code redemption | Entra |
+| `state` | request and response correlation | client |
+| `nonce` | ID token tied to the request | client |
+| `redirect_uri` | where responses may be sent | Entra |
+| ID token | audience: the client app | client |
+| Access token | audience: the resource/API | resource |
 
 ---
 
-# 13. What I Learned
+## 13. What I learned
 
-- How the OAuth 2.0 Authorization Code Flow works at the protocol level.
-- How PKCE protects authorization-code redemption.
-- Why the `code_challenge` is sent before the `code_verifier`.
-- The different security roles of PKCE, `state`, and `nonce`.
-- The distinction between ID tokens and access tokens.
-- That access tokens may be opaque rather than JWTs.
-- How redirect URI validation contributes to the security of the flow.
-- That authorization codes cannot simply be reused.
-- That a single OAuth error code can represent multiple underlying failures.
-- The importance of changing one variable at a time during security experiments.
+- The oauth flow including the various components like resource owner, client, authorization server and resource server. Learned that authorize request goes over the `front channel`(browser) and the token request goes over the `back channel` 
+- The authorize request parameters - `client_id`, `response_type`, `state`, `nonce`, `scope`, `redirect_uri`, `code_challenge`, & `code_challenge_method`.
+- The token request parameters - `code`, `grant_type`, `code_verifier`, `redirect_uri` & `client_id`
+- The role of PKCE, i.e., how `code_verifier` and `code_challenge` ensure that the `code` even when intercepted cannot be used by an attacker to get tokens.
+- I also learned that resending the same code, changing the `verifier`, or modifying the `code` results in `invalid_grant` error. Modifying the `redirect_uri` returns the `invalid_request` error, with clear description of what error occurred in the response.Modifying the redirect_uri returned invalid_request. Each response had a clear description of the error.
+- Interestingly, when the character near the end of the code, just before the trailing `$$` was changed, I still received valid tokens. I couldn't explain why this is so.  
+- Entra does not check `state`. It never receives it at the token step. The client has to verify that they match and reject the response when they do not match.
+- In my run, the personal-account access token was not a decodable JWT, but it worked fine against Graph.
 
 ---
 
-# 14. Next Steps
+## 14. Next steps
 
-This lab provides the protocol foundation for the next set of identity-security exercises.
-
-Planned areas:
-
+- JWT signature verification and the OIDC discovery document (JWKS)
+- Refresh tokens and sessions
 - Microsoft Entra application security
-- Delegated vs. application permissions
-- OAuth consent
-- Service principals
+- Delegated vs. application permissions, OAuth consent, service principals
 - Application secrets and certificates
 - Microsoft Graph permissions
 - Identity attack paths
