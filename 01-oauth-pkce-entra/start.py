@@ -1,3 +1,9 @@
+# Generates a fresh PKCE verifier, state and nonce, and prints the
+# authorize URL. Replace CLIENT_ID with your app registration's
+# Application (client) ID before running. Redemption is done manually
+# with curl.exe (see README, section 6).
+
+
 import secrets
 import hashlib
 import base64
