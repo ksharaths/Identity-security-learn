@@ -16,9 +16,9 @@ def decode_jwt_part(segment: str) -> dict:
 def parse_jwt(token: str) -> tuple[dict, dict, str, str, str]:
     parts = token.split(".")
     if len(parts) != 3:
-        return ValueError("Invalid JWT format")
+        raise ValueError("Invalid JWT format")
     header, payload, signature = parts
-    
+
     header_dict = decode_jwt_part(header)
     payload_dict = decode_jwt_part(payload)
     
