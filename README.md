@@ -1,2 +1,2 @@
 # Identity-security-learn
-Hands-on identity seacurity learning journey with notes and labs
+Hands-on identity security learning journey with notes and labs
