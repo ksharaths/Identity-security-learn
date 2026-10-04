@@ -34,4 +34,4 @@ old_discovery_url = (
     + "/.well-known/openid-configuration"
 )
 
-print("metadata derived from the token would fetch:", old_discovery_url)
+print("Metadata derived from the token would fetch:", old_discovery_url)

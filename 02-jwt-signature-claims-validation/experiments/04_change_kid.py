@@ -12,7 +12,7 @@ token = token_response.get("id_token")
 header_dict, _, _, payload, signature = parse_jwt(token)
 
 print("Original kid:", header_dict.get("kid"))
-print("Original header valid?:", verify_signature(token))
+print("Original token valid?:", verify_signature(token))
 
 header_dict["kid"] = "sbkjnsafjnsaf9"
 print("Tampered kid:", header_dict.get("kid"))
@@ -21,6 +21,5 @@ modified_header = encode_jwt_part(header_dict)
 
 token = f"{modified_header}.{payload}.{signature}"
 
-print("Original kid:", header_dict.get("kid"))
-print("Tampered header valid?:", verify_signature(token))
+print("Tampered tokene valid?:", verify_signature(token))
 
