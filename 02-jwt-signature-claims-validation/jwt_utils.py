@@ -1,6 +1,17 @@
 import base64
 import json
 
+# Funtion to base64url encode
+def b64url_encode(value: bytes) -> str:
+    encoded_value = base64.urlsafe_b64encode(value)
+    return encoded_value.decode("ascii").rstrip("=")  
+
+# Function to encode the JWT segment
+def encode_jwt_part(segment: dict) -> str:
+    encoded_segment_text = json.dumps(segment, separators=(",",":"))
+    encoded_segment = encoded_segment_text.encode("utf-8")
+    return b64url_encode(encoded_segment)
+
 # Function to base64url decode
 def b64url_decode(value: str) -> bytes:
     padding_needed = (-len(value)) % 4
